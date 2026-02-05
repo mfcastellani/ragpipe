@@ -1,0 +1,22 @@
+[package]
+name = "ragpipe"
+version = "0.1.0"
+edition = "2021"
+description = "Streaming-first RAG pipelines in Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mfcastellani/ragpipe"
+readme = "README.md"
+rust-version = "1.75"
+keywords = ["rag", "llm", "streaming", "ai", "pipeline"]
+categories = ["asynchronous", "data-processing"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+bytes = "1"
+thiserror = "1"
+tracing = { version = "0.1", optional = true }
+
+[features]
+default = ["tracing"]
+tracing = ["dep:tracing"]
