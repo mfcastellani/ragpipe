@@ -16,7 +16,18 @@ async-trait = "0.1"
 bytes = "1"
 thiserror = "1"
 tracing = { version = "0.1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
 default = ["tracing"]
 tracing = ["dep:tracing"]
+ndjson = ["dep:serde", "dep:serde_json"]
+
+[[example]]
+name = "ndjson"
+required-features = ["ndjson"]
+
+[[example]]
+name = "ndjson_source"
+required-features = ["ndjson"]

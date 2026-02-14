@@ -137,6 +137,7 @@
 //! ## Feature Flags
 //!
 //! - `tracing` *(default)*: enables optional tracing spans/logging.
+//! - `ndjson`: enables NDJSON streaming decoder [`ndjson::NdjsonDecoder`].
 //!
 //! ---
 //!
@@ -170,6 +171,8 @@
 // Public modules
 pub mod chunk;
 pub mod error;
+#[cfg(feature = "ndjson")]
+pub mod ndjson;
 pub mod pipeline;
 pub mod source;
 pub mod store;

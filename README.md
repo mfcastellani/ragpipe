@@ -46,11 +46,39 @@ ragpipe exists to make streaming RAG ingestion feel natural in Rust.
 - Composable pipeline stages
 - Async end-to-end (tokio)
 - Cancellation support
+- Optional NDJSON streaming decoder (`ndjson` feature)
 - Adapters like map, filter, inspect, try_map, try_map_ref
 - Per-item retry policies (backoff, max delay, optional jitter, retry predicate)
 - Production-oriented design (no hidden buffering)
 
-Quick Example
+### NDJSON Decoder
+
+Enable feature `ndjson` to decode line-delimited JSON from `Bytes` chunks without loading full files in memory:
+
+```toml
+ragpipe = { version = "0.2", features = ["ndjson"] }
+```
+
+Then use the `NdjsonDecoder` to decode chunks of JSON into `serde_json::Value`s:
+
+```rust
+use ragpipe::ndjson::NdjsonDecoder;
+
+let decode = NdjsonDecoder::<serde_json::Value>::new()
+    .max_line_bytes(1024 * 1024)
+    .allow_empty_lines(true);
+```
+
+For file ingestion, use `NdjsonSource` directly:
+
+```rust
+use ragpipe::source::ndjson::NdjsonSource;
+
+let source = NdjsonSource::<serde_json::Value>::from_file("mocks/data.ndjson")
+    .allow_empty_lines(true);
+```
+
+#### Quick Example
 
 ```rust
 use ragpipe::pipeline::chain::PipeExt;
@@ -136,7 +164,7 @@ source.inspect(|chunk| println!("chunk size = {}", chunk.len()))
 
 ```rust
 use std::time::Duration;
-use ragpipe::pipeline::retry::RetryPolicy;
+use ragpipe::pipeline::retry::{RetryPolicy, ErrorAction};
 
 let retry = RetryPolicy::new(4)
     .base_delay(Duration::from_millis(25))
@@ -150,11 +178,11 @@ let pipeline = source
     .with_retry(retry)
     .on_error(|ctx| {
         eprintln!(
-            "stage={} attempt={} err={}",
-            ctx.stage, ctx.attempt, ctx.error
-        );
+        "stage={} attempt={} err={}",
+        ctx.stage, ctx.attempt, ctx.error
+    );
 
-    ragpipe::pipeline::retry::ErrorAction::Retry
+    ErrorAction::Retry
 });
 ```
 
@@ -165,7 +193,7 @@ Use this for large items when retries are enabled, to avoid `Clone` on every ret
 
 ```rust
 let pipeline = source
-    .try_map_ref("embed", |chunk| std::future::ready(embed_ref(chunk)))
+    .try_map_ref("embed", |chunk| async move { embed_ref(chunk).await })
     .with_retry(retry);
 ```
 
@@ -184,19 +212,19 @@ Stages are expected to exit gracefully when cancellation occurs.
 
 ## Roadmap
 
-### v0.1 (current)
+### v0.1
 
-- core streaming pipeline engine
-- chaining
-- cancellation
-- adapters (map/filter/inspect)
-- basic sources and sinks
+- ✅ core streaming pipeline engine 
+- ✅ chaining
+- ✅ cancellation
+- ✅ adapters (map/filter/inspect)
+- ✅ basic sources and sinks
 
-### v0.2
+### v0.2 (current)
 
-- S3 streaming source
-- NDJSON ingestion
+- ✅ NDJSON ingestion
 - embedding providers (OpenAI / local)
+- S3 streaming source
 
 ### v0.3
 
