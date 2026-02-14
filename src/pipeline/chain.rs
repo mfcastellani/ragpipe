@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -5,8 +6,10 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::pipeline::adapters::{FilterPipe, InspectPipe, MapPipe};
+use crate::pipeline::adapters_try::{TryMapPipe, TryMapRefPipe};
 use crate::pipeline::cancel::CancelToken;
 use crate::pipeline::pipe::Pipe;
+use crate::pipeline::retry::{ErrorAction, ErrorContext, RetryPolicy};
 
 pub struct Chain<A, B, M> {
     a: A,
@@ -21,6 +24,44 @@ impl<A, B, M> Chain<A, B, M> {
             b,
             _m: PhantomData,
         }
+    }
+}
+
+impl<A, F, M> Chain<A, TryMapPipe<F>, M> {
+    pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
+        self.b = self.b.with_retry(policy);
+        self
+    }
+
+    pub fn retry(self, policy: RetryPolicy) -> Self {
+        self.with_retry(policy)
+    }
+
+    pub fn on_error<H>(mut self, handler: H) -> Self
+    where
+        H: for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync + 'static,
+    {
+        self.b = self.b.on_error(handler);
+        self
+    }
+}
+
+impl<A, F, M> Chain<A, TryMapRefPipe<F>, M> {
+    pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
+        self.b = self.b.with_retry(policy);
+        self
+    }
+
+    pub fn retry(self, policy: RetryPolicy) -> Self {
+        self.with_retry(policy)
+    }
+
+    pub fn on_error<H>(mut self, handler: H) -> Self
+    where
+        H: for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync + 'static,
+    {
+        self.b = self.b.on_error(handler);
+        self
     }
 }
 
@@ -119,6 +160,28 @@ where
         Self: Send + Sync,
     {
         Chain::new(self, InspectPipe(f))
+    }
+
+    fn try_map<N, F, Fut>(self, stage: &'static str, f: F) -> Chain<Self, TryMapPipe<F>, O>
+    where
+        N: Send + 'static,
+        O: Clone + Send + 'static,
+        F: Fn(O) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<N>> + Send + 'static,
+        Self: Send + Sync,
+    {
+        Chain::new(self, TryMapPipe::new(stage, f))
+    }
+
+    fn try_map_ref<N, F, Fut>(self, stage: &'static str, f: F) -> Chain<Self, TryMapRefPipe<F>, O>
+    where
+        N: Send + 'static,
+        O: Send + 'static,
+        F: Fn(&O) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<N>> + Send + 'static,
+        Self: Send + Sync,
+    {
+        Chain::new(self, TryMapRefPipe::new(stage, f))
     }
 }
 

@@ -46,7 +46,8 @@ ragpipe exists to make streaming RAG ingestion feel natural in Rust.
 - Composable pipeline stages
 - Async end-to-end (tokio)
 - Cancellation support
-- Adapters like map, filter, inspect
+- Adapters like map, filter, inspect, try_map, try_map_ref
+- Per-item retry policies (backoff, max delay, optional jitter, retry predicate)
 - Production-oriented design (no hidden buffering)
 
 Quick Example
@@ -61,10 +62,9 @@ use ragpipe::store::debug::DebugSink;
 
 #[tokio::main]
 async fn main() -> ragpipe::error::Result<()> {
-let pipeline =
-FsSource::new("big.txt")
-.pipe(TokenChunker::new(512))
-.pipe(DebugSink);
+    let pipeline = FsSource::new("big.txt")
+        .pipe(TokenChunker::new(512))
+        .pipe(DebugSink);
 
     let rt = Runtime::new().buffer(128);
 
@@ -130,6 +130,43 @@ source.filter(|x| x.is_valid())
 
 ```rust
 source.inspect(|chunk| println!("chunk size = {}", chunk.len()))
+```
+
+### try_map + retry
+
+```rust
+use std::time::Duration;
+use ragpipe::pipeline::retry::RetryPolicy;
+
+let retry = RetryPolicy::new(4)
+    .base_delay(Duration::from_millis(25))
+    .max_delay(Duration::from_secs(1))
+    .with_jitter(Duration::from_millis(20))
+    // Prefer structured error predicates over string matching:
+    .retry_if(|err| matches!(err, ragpipe::error::Error::Pipeline { .. }));
+
+let pipeline = source
+    .try_map("embed", |chunk| async move { embed(chunk).await })
+    .with_retry(retry)
+    .on_error(|ctx| {
+        eprintln!(
+            "stage={} attempt={} err={}",
+            ctx.stage, ctx.attempt, ctx.error
+        );
+
+    ragpipe::pipeline::retry::ErrorAction::Retry
+});
+```
+
+
+### try_map_ref + retry (zero-copy)
+
+Use this for large items when retries are enabled, to avoid `Clone` on every retry:
+
+```rust
+let pipeline = source
+    .try_map_ref("embed", |chunk| std::future::ready(embed_ref(chunk)))
+    .with_retry(retry);
 ```
 
 These adapters are cancellable and streaming-safe.

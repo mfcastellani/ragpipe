@@ -1,86 +1,10 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use ragpipe::error::{Error, Result};
-use ragpipe::pipeline::cancel::CancelToken;
+use ragpipe::error::Result;
 use ragpipe::pipeline::chain::PipeExt;
-use ragpipe::pipeline::pipe::Pipe;
 use ragpipe::pipeline::runtime::Runtime;
-use tokio::sync::mpsc::{Receiver, Sender};
-
-#[derive(Clone)]
-struct VecSource<T> {
-    items: Vec<T>,
-}
-impl<T> VecSource<T> {
-    fn new(items: Vec<T>) -> Self {
-        Self { items }
-    }
-}
-
-#[async_trait]
-impl<T> Pipe<(), T> for VecSource<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
-    async fn process(
-        &self,
-        mut input: Receiver<()>,
-        output: Sender<T>,
-        _buffer: usize,
-        cancel: CancelToken,
-    ) -> Result<()> {
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            _ = input.recv() => {}
-        }
-
-        let items = self.items.clone();
-        for v in items {
-            if cancel.is_cancelled() {
-                break;
-            }
-            if output.send(v).await.is_err() {
-                return Err(Error::pipeline("output channel closed"));
-            }
-        }
-        Ok(())
-    }
-}
-
-struct CollectSink<T> {
-    out: Arc<Mutex<Vec<T>>>,
-}
-impl<T> CollectSink<T> {
-    fn new(out: Arc<Mutex<Vec<T>>>) -> Self {
-        Self { out }
-    }
-}
-
-#[async_trait]
-impl<T> Pipe<T, ()> for CollectSink<T>
-where
-    T: Send + Sync + 'static,
-{
-    async fn process(
-        &self,
-        mut input: Receiver<T>,
-        _output: Sender<()>,
-        _buffer: usize,
-        cancel: CancelToken,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                msg = input.recv() => {
-                    let Some(v) = msg else { break; };
-                    self.out.lock().unwrap().push(v);
-                }
-            }
-        }
-        Ok(())
-    }
-}
+mod common;
+use common::{CollectSink, VecSource};
 
 #[tokio::test]
 async fn map_transforms_items() -> Result<()> {
@@ -88,6 +12,7 @@ async fn map_transforms_items() -> Result<()> {
     let sink = CollectSink::new(collected.clone());
 
     let pipe = VecSource::new(vec![1u32, 2, 3])
+        .strict_downstream(true)
         .map(|v| v * 10)
         .pipe::<(), _>(sink);
 
@@ -113,6 +38,7 @@ async fn filter_keeps_only_matching() -> Result<()> {
     let sink = CollectSink::new(collected.clone());
 
     let pipe = VecSource::new(vec![1u32, 2, 3, 4, 5])
+        .strict_downstream(true)
         .filter(|v| *v % 2 == 0)
         .pipe::<(), _>(sink);
 
@@ -140,6 +66,7 @@ async fn inspect_sees_all_items() -> Result<()> {
     let sink = CollectSink::new(collected.clone());
 
     let pipe = VecSource::new(vec![7u32, 8, 9])
+        .strict_downstream(true)
         .inspect(move |v| seen2.lock().unwrap().push(*v))
         .pipe::<(), _>(sink);
 

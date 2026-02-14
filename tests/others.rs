@@ -1,92 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use ragpipe::chunk::tokens::TokenChunker;
-use ragpipe::error::{Error, Result};
-use ragpipe::pipeline::cancel::CancelToken;
+use ragpipe::error::Result;
 use ragpipe::pipeline::chain::PipeExt;
-use ragpipe::pipeline::pipe::Pipe;
 use ragpipe::pipeline::runtime::Runtime;
 use ragpipe::source::fs::FsSource;
 use ragpipe::store::debug::DebugSink;
-use tokio::sync::mpsc::{Receiver, Sender};
-
-#[derive(Clone)]
-struct VecSource<T> {
-    items: Vec<T>,
-}
-
-impl<T> VecSource<T> {
-    fn new(items: Vec<T>) -> Self {
-        Self { items }
-    }
-}
-
-#[async_trait]
-impl<T> Pipe<(), T> for VecSource<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
-    async fn process(
-        &self,
-        mut input: Receiver<()>,
-        output: Sender<T>,
-        _buffer: usize,
-        cancel: CancelToken,
-    ) -> Result<()> {
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            _ = input.recv() => {}
-        }
-
-        let items = self.items.clone();
-        for v in items {
-            if cancel.is_cancelled() {
-                break;
-            }
-            if output.send(v).await.is_err() {
-                return Err(Error::pipeline("output channel closed"));
-            }
-        }
-        Ok(())
-    }
-}
-
-struct CollectSink<T> {
-    out: Arc<Mutex<Vec<T>>>,
-}
-
-impl<T> CollectSink<T> {
-    fn new(out: Arc<Mutex<Vec<T>>>) -> Self {
-        Self { out }
-    }
-}
-
-#[async_trait]
-impl<T> Pipe<T, ()> for CollectSink<T>
-where
-    T: Send + Sync + 'static,
-{
-    async fn process(
-        &self,
-        mut input: Receiver<T>,
-        _output: Sender<()>,
-        _buffer: usize,
-        cancel: CancelToken,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                msg = input.recv() => {
-                    let Some(v) = msg else { break; };
-                    self.out.lock().unwrap().push(v);
-                }
-            }
-        }
-        Ok(())
-    }
-}
+mod common;
+use common::{CollectSink, VecSource};
 
 #[tokio::test]
 async fn token_chunker_splits_bytes() -> Result<()> {
@@ -95,6 +17,7 @@ async fn token_chunker_splits_bytes() -> Result<()> {
 
     let input = Bytes::from_static(b"abcdefghij");
     let pipe = VecSource::new(vec![input])
+        .strict_downstream(true)
         .pipe::<Bytes, _>(TokenChunker::new(4))
         .pipe::<(), _>(sink);
 
@@ -156,7 +79,9 @@ async fn fs_source_reads_file() -> Result<()> {
 #[tokio::test]
 async fn debug_sink_consumes_bytes() -> Result<()> {
     let input = Bytes::from_static(b"hello");
-    let pipe = VecSource::new(vec![input]).pipe::<(), _>(DebugSink);
+    let pipe = VecSource::new(vec![input])
+        .strict_downstream(true)
+        .pipe::<(), _>(DebugSink);
 
     let rt = Runtime::new().buffer(8);
     let (tx, mut rx, _cancel, handle) = rt.spawn(pipe);

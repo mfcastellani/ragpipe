@@ -71,15 +71,38 @@
 //!
 //! ```no_run
 //! use ragpipe::pipeline::chain::PipeExt;
+//! use ragpipe::pipeline::retry::RetryPolicy;
 //!
 //! # fn example<S>(source: S)
 //! # where
 //! #   S: ragpipe::pipeline::pipe::Pipe<(), u32> + Send + Sync + 'static,
 //! # {
+//! let retry = RetryPolicy::new(3)
+//!     .base_delay(std::time::Duration::from_millis(10))
+//!     .max_delay(std::time::Duration::from_millis(200));
+//!
 //! let pipeline = source
 //!     .map(|x| x * 10)
 //!     .filter(|x| *x > 20)
+//!     .try_map("enrich", |x| async move { Ok::<u32, ragpipe::error::Error>(x + 1) })
+//!     .with_retry(retry)
 //!     .inspect(|x| println!("value = {x}"));
+//! # }
+//! ```
+//!
+//! For large items, prefer `try_map_ref` to avoid `Clone` during retries:
+//!
+//! ```no_run
+//! use ragpipe::pipeline::chain::PipeExt;
+//! # fn example<S>(source: S)
+//! # where
+//! #   S: ragpipe::pipeline::pipe::Pipe<(), Vec<u8>> + Send + Sync + 'static,
+//! # {
+//! let pipeline = source
+//!     .try_map_ref("validate", |bytes| {
+//!         std::future::ready(Ok::<usize, ragpipe::error::Error>(bytes.len()))
+//!     });
+//! # let _ = pipeline;
 //! # }
 //! ```
 //!
@@ -156,5 +179,6 @@ pub mod prelude {
 
     pub use crate::pipeline::cancel::CancelToken;
     pub use crate::pipeline::chain::PipeExt;
+    pub use crate::pipeline::retry::RetryPolicy;
     pub use crate::pipeline::runtime::Runtime;
 }

@@ -5,5 +5,4 @@ fmt-all = [
     "--",
     "--config",
     "imports_granularity=Module,group_imports=StdExternalCrate",
-    "--check",
 ]
