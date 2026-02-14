@@ -1,10 +1,9 @@
 #![cfg(feature = "ndjson")]
 
-use serde::Deserialize;
-
 use ragpipe::error::Result;
 use ragpipe::pipeline::runtime::Runtime;
 use ragpipe::source::ndjson::NdjsonSource;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct Row {

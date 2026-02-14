@@ -1,11 +1,10 @@
 //! Run with:
 //!   cargo run --example ndjson_source --features ndjson
 
-use serde_json::Value;
-
 use ragpipe::error::{Error, Result};
 use ragpipe::pipeline::runtime::Runtime;
 use ragpipe::source::ndjson::NdjsonSource;
+use serde_json::Value;
 
 #[tokio::main]
 async fn main() -> Result<()> {

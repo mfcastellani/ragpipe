@@ -6,18 +6,18 @@
 //! This is a "fake" end-to-end pipeline:
 //! VecSource<Bytes> -> NdjsonDecoder<Value> -> CollectSink<Value>
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use bytes::Bytes;
-use serde_json::Value;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{Receiver, Sender};
-
 use ragpipe::error::{Error, Result};
 use ragpipe::ndjson::NdjsonDecoder;
 use ragpipe::pipeline::cancel::CancelToken;
 use ragpipe::pipeline::chain::PipeExt;
 use ragpipe::pipeline::pipe::Pipe;
 use ragpipe::pipeline::runtime::Runtime;
+use serde_json::Value;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Clone)]
 struct VecSource<T> {
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
 
     // Wait
     handle.await??;
-    drain.await.map_err(|e| Error::Join(e))?;
+    drain.await.map_err(Error::Join)?;
 
     // Print collected values
     let out = collected.lock().unwrap();
