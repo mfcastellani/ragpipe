@@ -11,7 +11,7 @@ keywords = ["rag", "llm", "streaming", "ai", "pipeline"]
 categories = ["asynchronous", "data-processing"]
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 async-trait = "0.1"
 bytes = "1"
 thiserror = "1"
@@ -23,6 +23,9 @@ serde_json = { version = "1", optional = true }
 default = ["tracing"]
 tracing = ["dep:tracing"]
 ndjson = ["dep:serde", "dep:serde_json"]
+
+[dev-dependencies]
+proptest = "1"
 
 [[example]]
 name = "ndjson"

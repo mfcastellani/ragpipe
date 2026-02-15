@@ -146,3 +146,59 @@ impl Clone for ErrorHandler {
         Self(self.0.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn backoff_is_non_decreasing_and_capped(
+            base_ms in 1u64..50,
+            max_ms in 1u64..200,
+            attempts in 1u32..32
+        ) {
+            let max_ms = max_ms.max(base_ms);
+            let policy = RetryPolicy::new(8)
+                .base_delay(Duration::from_millis(base_ms))
+                .max_delay(Duration::from_millis(max_ms));
+
+            let mut prev = Duration::ZERO;
+            for attempt in 1..=attempts {
+                let delay = policy.backoff_delay(attempt);
+                prop_assert!(delay >= prev);
+                prop_assert!(delay <= Duration::from_millis(max_ms));
+                prev = delay;
+            }
+        }
+
+        #[test]
+        fn jitter_stays_within_expected_bounds(
+            base_ms in 1u64..50,
+            max_ms in 1u64..200,
+            jitter_ms in 0u64..50,
+            attempts in 1u32..32
+        ) {
+            let max_ms = max_ms.max(base_ms);
+            let base_policy = RetryPolicy::new(8)
+                .base_delay(Duration::from_millis(base_ms))
+                .max_delay(Duration::from_millis(max_ms));
+            let jitter_policy = base_policy
+                .clone()
+                .with_jitter(Duration::from_millis(jitter_ms));
+
+            for attempt in 1..=attempts {
+                let no_jitter = base_policy.backoff_delay(attempt);
+                let with_jitter = jitter_policy.backoff_delay(attempt);
+                let upper = no_jitter
+                    .saturating_add(Duration::from_millis(jitter_ms))
+                    .min(Duration::from_millis(max_ms));
+
+                prop_assert!(with_jitter >= no_jitter);
+                prop_assert!(with_jitter <= upper);
+                prop_assert!(with_jitter <= Duration::from_millis(max_ms));
+            }
+        }
+    }
+}
