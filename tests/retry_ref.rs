@@ -74,7 +74,8 @@ async fn try_map_ref_retries_non_clone_item() -> Result<()> {
 
     let retry = RetryPolicy::new(4)
         .base_delay(Duration::from_millis(1))
-        .max_delay(Duration::from_millis(2));
+        .max_delay(Duration::from_millis(2))
+        .retry_if(|_| true);
 
     let source = QueueSource::new(vec![NonCloneItem {
         id: 7,
@@ -120,7 +121,8 @@ async fn try_map_ref_cancellation_during_backoff_stops() -> Result<()> {
 
     let retry = RetryPolicy::new(10)
         .base_delay(Duration::from_secs(10))
-        .max_delay(Duration::from_secs(10));
+        .max_delay(Duration::from_secs(10))
+        .retry_if(|_| true);
 
     let source = QueueSource::new(vec![NonCloneItem {
         id: 1,

@@ -90,9 +90,15 @@ where
         })?;
 
         tokio::select! {
-            _ = cancel.cancelled() => Ok(EmitOutcome::Stop),
+            _ = cancel.cancelled() => {
+                #[cfg(feature = "tracing")]
+                tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = "ndjson_source", where_ = "send", "ragpipe.cancelled");
+                Ok(EmitOutcome::Stop)
+            },
             sent = output.send(value) => {
                 if sent.is_err() {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = "ndjson_source", "ragpipe.downstream.closed");
                     Ok(EmitOutcome::Stop)
                 } else {
                     Ok(EmitOutcome::Continue)
@@ -107,6 +113,10 @@ impl<T> Pipe<(), T> for NdjsonSource<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
+    fn stage_name(&self) -> &'static str {
+        "ndjson_source"
+    }
+
     async fn process(
         &self,
         mut input: Receiver<()>,
@@ -114,8 +124,15 @@ where
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage_name();
+
         tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => {
+                #[cfg(feature = "tracing")]
+                tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                return Ok(());
+            },
             _ = input.recv() => {}
         }
 
@@ -127,7 +144,11 @@ where
 
         loop {
             let n = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
+                _ = cancel.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "read", "ragpipe.cancelled");
+                    return Ok(());
+                },
                 read = file.read(&mut read_buf) => {
                     read.map_err(|e| Error::stage_source("ndjson", e.into()))?
                 }

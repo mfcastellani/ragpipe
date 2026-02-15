@@ -4,7 +4,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::pipeline::cancel::CancelToken;
 use crate::pipeline::pipe::Pipe;
 
@@ -20,6 +20,10 @@ impl FsSource {
 
 #[async_trait]
 impl Pipe<(), Bytes> for FsSource {
+    fn stage_name(&self) -> &'static str {
+        "fs_source"
+    }
+
     async fn process(
         &self,
         mut input: Receiver<()>,
@@ -27,8 +31,15 @@ impl Pipe<(), Bytes> for FsSource {
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage_name();
+
         tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => {
+                #[cfg(feature = "tracing")]
+                tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                return Ok(());
+            },
             _ = input.recv() => {}
         }
 
@@ -37,11 +48,26 @@ impl Pipe<(), Bytes> for FsSource {
         file.read_to_end(&mut buf).await?;
 
         if cancel.is_cancelled() {
+            #[cfg(feature = "tracing")]
+            tracing::event!(
+                tracing::Level::DEBUG,
+                event = "ragpipe.cancelled",
+                stage = stage,
+                where_ = "send",
+                "ragpipe.cancelled"
+            );
             return Ok(());
         }
 
         if output.send(Bytes::from(buf)).await.is_err() {
-            return Err(Error::pipeline("output channel closed"));
+            #[cfg(feature = "tracing")]
+            tracing::event!(
+                tracing::Level::INFO,
+                event = "ragpipe.downstream.closed",
+                stage = stage,
+                "ragpipe.downstream.closed"
+            );
+            return Ok(());
         }
         Ok(())
     }

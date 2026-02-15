@@ -79,7 +79,8 @@
 //! # {
 //! let retry = RetryPolicy::new(3)
 //!     .base_delay(std::time::Duration::from_millis(10))
-//!     .max_delay(std::time::Duration::from_millis(200));
+//!     .max_delay(std::time::Duration::from_millis(200))
+//!     .retry_if(|err| matches!(err, ragpipe::error::Error::Pipeline { .. }));
 //!
 //! let pipeline = source
 //!     .map(|x| x * 10)
@@ -90,6 +91,10 @@
 //! # }
 //! ```
 //!
+//! `RetryPolicy::new(max_attempts)` retries nothing by default.
+//! Configure retryability explicitly via `.retry_if(...)`.
+//!
+//! `try_map` consumes each item and may require `Clone` when retries are enabled.
 //! For large items, prefer `try_map_ref` to avoid `Clone` during retries:
 //!
 //! ```no_run
@@ -105,6 +110,19 @@
 //! # let _ = pipeline;
 //! # }
 //! ```
+//!
+//! ---
+//!
+//! ## Error Handling Contract
+//!
+//! `try_map` and `try_map_ref` support `.on_error(...)` for per-item behavior:
+//!
+//! - `ErrorAction::Retry`: retry the current item (bounded by `max_attempts`)
+//! - `ErrorAction::Skip`: drop the current item and continue
+//! - `ErrorAction::Fail(err)`: fail the stage immediately with `err`
+//!
+//! If a handler is set, its action overrides the policy's default retry/fail
+//! decision. `max_attempts` is still enforced.
 //!
 //! ---
 //!
@@ -131,6 +149,45 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ---
+//!
+//! ## API Contracts
+//!
+//! - Bounded memory/backpressure: stages communicate over bounded Tokio channels.
+//! - Cancellation: stages stop promptly when cancelled; no further retries run.
+//! - Retry defaults: `RetryPolicy::new(max_attempts)` retries nothing unless
+//!   `retry_if(...)` is configured.
+//! - Downstream closed: if a stage cannot send because downstream is closed, it
+//!   exits gracefully without error.
+//!
+//! ---
+//!
+//! ## Observability
+//!
+//! Enable tracing instrumentation with:
+//!
+//! ```toml
+//! ragpipe = { version = "0.2", features = ["tracing"] }
+//! ```
+//!
+//! Minimal subscriber setup:
+//!
+//! ```ignore
+//! use tracing_subscriber::fmt;
+//!
+//! fn main() {
+//!     fmt()
+//!         .with_target(false)
+//!         .with_env_filter("ragpipe=info")
+//!         .init();
+//! }
+//! ```
+//!
+//! `ragpipe` emits structured spans/events such as `ragpipe.stage`,
+//! `ragpipe.retry.attempt_failed`, `ragpipe.retry.sleep`,
+//! `ragpipe.retry.exhausted`, `ragpipe.error_handler.action`,
+//! `ragpipe.downstream.closed`, and `ragpipe.cancelled`.
 //!
 //! ---
 //!

@@ -40,6 +40,18 @@ impl Runtime {
         let cancel = CancelToken::default();
         let cancel_task = cancel.clone();
 
+        #[cfg(feature = "tracing")]
+        let handle = {
+            use tracing::Instrument;
+            let stage = pipe.stage_name();
+            let span = tracing::info_span!("ragpipe.stage", stage = stage, buffer = buffer);
+            tokio::spawn(
+                async move { pipe.process(rx_in, tx_out, buffer, cancel_task).await }
+                    .instrument(span),
+            )
+        };
+
+        #[cfg(not(feature = "tracing"))]
         let handle =
             tokio::spawn(async move { pipe.process(rx_in, tx_out, buffer, cancel_task).await });
 

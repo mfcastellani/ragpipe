@@ -22,6 +22,12 @@ pub struct TryMapRefPipe<F> {
     error_handler: Option<ErrorHandler>,
 }
 
+enum RunResult<O> {
+    Emit(O),
+    Skip,
+    Stop,
+}
+
 impl<F> TryMapPipe<F> {
     pub fn new(stage: &'static str, f: F) -> Self {
         Self {
@@ -32,15 +38,25 @@ impl<F> TryMapPipe<F> {
         }
     }
 
+    /// Configure retry policy for this stage.
+    ///
+    /// `RetryPolicy::new(max_attempts)` does not retry by default until
+    /// `retry_if(...)` is configured.
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
     }
 
+    /// Deprecated alias for [`Self::with_retry`].
+    #[deprecated(note = "use with_retry()")]
     pub fn retry(self, policy: RetryPolicy) -> Self {
         self.with_retry(policy)
     }
 
+    /// Install a per-item error handler.
+    ///
+    /// If set, this handler overrides the policy's default retry/fail decision.
+    /// `ErrorAction::Retry` still obeys `max_attempts`.
     pub fn on_error<H>(mut self, handler: H) -> Self
     where
         H: for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync + 'static,
@@ -60,15 +76,25 @@ impl<F> TryMapRefPipe<F> {
         }
     }
 
+    /// Configure retry policy for this stage.
+    ///
+    /// `RetryPolicy::new(max_attempts)` does not retry by default until
+    /// `retry_if(...)` is configured.
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
     }
 
+    /// Deprecated alias for [`Self::with_retry`].
+    #[deprecated(note = "use with_retry()")]
     pub fn retry(self, policy: RetryPolicy) -> Self {
         self.with_retry(policy)
     }
 
+    /// Install a per-item error handler.
+    ///
+    /// If set, this handler overrides the policy's default retry/fail decision.
+    /// `ErrorAction::Retry` still obeys `max_attempts`.
     pub fn on_error<H>(mut self, handler: H) -> Self
     where
         H: for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync + 'static,
@@ -86,6 +112,10 @@ where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<O>> + Send,
 {
+    fn stage_name(&self) -> &'static str {
+        self.stage
+    }
+
     async fn process(
         &self,
         mut input: Receiver<I>,
@@ -93,17 +123,27 @@ where
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage_name();
+
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                _ = cancel.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                    break
+                },
                 msg = input.recv() => {
                     let Some(item) = msg else { break; };
                     let value = match self.run_with_retry(item, cancel.clone()).await? {
-                        Some(v) => v,
-                        None => break,
+                        RunResult::Emit(v) => v,
+                        RunResult::Skip => continue,
+                        RunResult::Stop => break,
                     };
 
                     if output.send(value).await.is_err() {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = stage, "ragpipe.downstream.closed");
                         break;
                     }
                 }
@@ -121,6 +161,10 @@ where
     F: Fn(&I) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<O>> + Send + 'static,
 {
+    fn stage_name(&self) -> &'static str {
+        self.stage
+    }
+
     async fn process(
         &self,
         mut input: Receiver<I>,
@@ -128,17 +172,27 @@ where
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage_name();
+
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                _ = cancel.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                    break
+                },
                 msg = input.recv() => {
                     let Some(item) = msg else { break; };
                     let value = match self.run_with_retry(item, cancel.clone()).await? {
-                        Some(v) => v,
-                        None => break,
+                        RunResult::Emit(v) => v,
+                        RunResult::Skip => continue,
+                        RunResult::Stop => break,
                     };
 
                     if output.send(value).await.is_err() {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = stage, "ragpipe.downstream.closed");
                         break;
                     }
                 }
@@ -149,7 +203,7 @@ where
 }
 
 impl<F> TryMapPipe<F> {
-    async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<Option<O>>
+    async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<RunResult<O>>
     where
         I: Clone,
         F: Fn(I) -> Fut,
@@ -159,10 +213,21 @@ impl<F> TryMapPipe<F> {
         let mut attempt = 1u32;
 
         loop {
+            if cancel.is_cancelled() {
+                #[cfg(feature = "tracing")]
+                tracing::event!(
+                    tracing::Level::DEBUG,
+                    event = "ragpipe.cancelled",
+                    stage = self.stage,
+                    where_ = "attempt",
+                    "ragpipe.cancelled"
+                );
+                return Ok(RunResult::Stop);
+            }
             let current_item = item.clone();
 
             match (self.f)(current_item).await {
-                Ok(value) => return Ok(Some(value)),
+                Ok(value) => return Ok(RunResult::Emit(value)),
 
                 Err(error) => {
                     let mut error_slot = Some(error);
@@ -176,11 +241,24 @@ impl<F> TryMapPipe<F> {
                             .as_ref()
                             .expect("error must be available for context"),
                     };
+                    let retryable = self.retry_policy.is_retryable(ctx.error);
+
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(
+                        tracing::Level::WARN,
+                        event = "ragpipe.retry.attempt_failed",
+                        stage = self.stage,
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        retryable = retryable,
+                        error = %ctx.error,
+                        "ragpipe.retry.attempt_failed"
+                    );
 
                     // Default action: retry when retryable, otherwise fail with original error.
                     let action = if let Some(handler) = &self.error_handler {
                         handler.call(ctx)
-                    } else if self.retry_policy.is_retryable(ctx.error) {
+                    } else if retryable {
                         ErrorAction::Retry
                     } else {
                         ErrorAction::Fail(
@@ -189,14 +267,40 @@ impl<F> TryMapPipe<F> {
                                 .expect("error must be available for fail action"),
                         )
                     };
+                    let action_name = match &action {
+                        ErrorAction::Retry => "retry",
+                        ErrorAction::Skip => "skip",
+                        ErrorAction::Fail(_) => "fail",
+                    };
+                    if self.error_handler.is_some()
+                        && ((retryable && action_name != "retry")
+                            || (!retryable && action_name != "fail"))
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(
+                            tracing::Level::DEBUG,
+                            event = "ragpipe.error_handler.action",
+                            stage = self.stage,
+                            attempt = attempt,
+                            action = action_name,
+                            "ragpipe.error_handler.action"
+                        );
+                    }
 
                     match action {
-                        ErrorAction::Skip => return Ok(None),
-                        ErrorAction::Fail(mapped) => {
-                            return Err(Error::stage_source(self.stage, mapped));
-                        }
                         ErrorAction::Retry => {
                             if attempt >= max_attempts {
+                                #[cfg(feature = "tracing")]
+                                tracing::event!(
+                                    tracing::Level::ERROR,
+                                    event = "ragpipe.retry.exhausted",
+                                    stage = self.stage,
+                                    attempts = max_attempts,
+                                    error = %error_slot
+                                        .as_ref()
+                                        .expect("error must be available for retry exhaustion"),
+                                    "ragpipe.retry.exhausted"
+                                );
                                 return Err(Error::retry_exhausted(
                                     self.stage,
                                     max_attempts,
@@ -208,13 +312,30 @@ impl<F> TryMapPipe<F> {
 
                             let delay = self.retry_policy.backoff_delay(attempt);
                             if !delay.is_zero() {
+                                #[cfg(feature = "tracing")]
+                                tracing::event!(
+                                    tracing::Level::WARN,
+                                    event = "ragpipe.retry.sleep",
+                                    stage = self.stage,
+                                    attempt = attempt,
+                                    delay_ms = delay.as_millis() as u64,
+                                    "ragpipe.retry.sleep"
+                                );
                                 tokio::select! {
-                                    _ = cancel.cancelled() => return Ok(None),
+                                    _ = cancel.cancelled() => {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = self.stage, where_ = "backoff", "ragpipe.cancelled");
+                                        return Ok(RunResult::Stop)
+                                    },
                                     _ = tokio::time::sleep(delay) => {}
                                 }
                             }
 
                             attempt += 1;
+                        }
+                        ErrorAction::Skip => return Ok(RunResult::Skip),
+                        ErrorAction::Fail(mapped) => {
+                            return Err(Error::stage_source(self.stage, mapped))
                         }
                     }
                 }
@@ -224,7 +345,7 @@ impl<F> TryMapPipe<F> {
 }
 
 impl<F> TryMapRefPipe<F> {
-    async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<Option<O>>
+    async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<RunResult<O>>
     where
         F: Fn(&I) -> Fut,
         Fut: Future<Output = Result<O>>,
@@ -233,8 +354,19 @@ impl<F> TryMapRefPipe<F> {
         let mut attempt = 1u32;
 
         loop {
+            if cancel.is_cancelled() {
+                #[cfg(feature = "tracing")]
+                tracing::event!(
+                    tracing::Level::DEBUG,
+                    event = "ragpipe.cancelled",
+                    stage = self.stage,
+                    where_ = "attempt",
+                    "ragpipe.cancelled"
+                );
+                return Ok(RunResult::Stop);
+            }
             match (self.f)(&item).await {
-                Ok(value) => return Ok(Some(value)),
+                Ok(value) => return Ok(RunResult::Emit(value)),
 
                 Err(error) => {
                     let mut error_slot = Some(error);
@@ -247,10 +379,23 @@ impl<F> TryMapRefPipe<F> {
                             .as_ref()
                             .expect("error must be available for context"),
                     };
+                    let retryable = self.retry_policy.is_retryable(ctx.error);
+
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(
+                        tracing::Level::WARN,
+                        event = "ragpipe.retry.attempt_failed",
+                        stage = self.stage,
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        retryable = retryable,
+                        error = %ctx.error,
+                        "ragpipe.retry.attempt_failed"
+                    );
 
                     let action = if let Some(handler) = &self.error_handler {
                         handler.call(ctx)
-                    } else if self.retry_policy.is_retryable(ctx.error) {
+                    } else if retryable {
                         ErrorAction::Retry
                     } else {
                         ErrorAction::Fail(
@@ -259,14 +404,40 @@ impl<F> TryMapRefPipe<F> {
                                 .expect("error must be available for fail action"),
                         )
                     };
+                    let action_name = match &action {
+                        ErrorAction::Retry => "retry",
+                        ErrorAction::Skip => "skip",
+                        ErrorAction::Fail(_) => "fail",
+                    };
+                    if self.error_handler.is_some()
+                        && ((retryable && action_name != "retry")
+                            || (!retryable && action_name != "fail"))
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(
+                            tracing::Level::DEBUG,
+                            event = "ragpipe.error_handler.action",
+                            stage = self.stage,
+                            attempt = attempt,
+                            action = action_name,
+                            "ragpipe.error_handler.action"
+                        );
+                    }
 
                     match action {
-                        ErrorAction::Skip => return Ok(None),
-                        ErrorAction::Fail(mapped) => {
-                            return Err(Error::stage_source(self.stage, mapped));
-                        }
                         ErrorAction::Retry => {
                             if attempt >= max_attempts {
+                                #[cfg(feature = "tracing")]
+                                tracing::event!(
+                                    tracing::Level::ERROR,
+                                    event = "ragpipe.retry.exhausted",
+                                    stage = self.stage,
+                                    attempts = max_attempts,
+                                    error = %error_slot
+                                        .as_ref()
+                                        .expect("error must be available for retry exhaustion"),
+                                    "ragpipe.retry.exhausted"
+                                );
                                 return Err(Error::retry_exhausted(
                                     self.stage,
                                     max_attempts,
@@ -278,13 +449,30 @@ impl<F> TryMapRefPipe<F> {
 
                             let delay = self.retry_policy.backoff_delay(attempt);
                             if !delay.is_zero() {
+                                #[cfg(feature = "tracing")]
+                                tracing::event!(
+                                    tracing::Level::WARN,
+                                    event = "ragpipe.retry.sleep",
+                                    stage = self.stage,
+                                    attempt = attempt,
+                                    delay_ms = delay.as_millis() as u64,
+                                    "ragpipe.retry.sleep"
+                                );
                                 tokio::select! {
-                                    _ = cancel.cancelled() => return Ok(None),
+                                    _ = cancel.cancelled() => {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = self.stage, where_ = "backoff", "ragpipe.cancelled");
+                                        return Ok(RunResult::Stop)
+                                    },
                                     _ = tokio::time::sleep(delay) => {}
                                 }
                             }
 
                             attempt += 1;
+                        }
+                        ErrorAction::Skip => return Ok(RunResult::Skip),
+                        ErrorAction::Fail(mapped) => {
+                            return Err(Error::stage_source(self.stage, mapped))
                         }
                     }
                 }

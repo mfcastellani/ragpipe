@@ -6,6 +6,10 @@ use crate::error::Error;
 type RetryPredicate = Arc<dyn Fn(&Error) -> bool + Send + Sync>;
 type BoxErrorHandler = Arc<dyn for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync>;
 
+/// Per-item retry policy used by `try_map` and `try_map_ref`.
+///
+/// By default, a policy retries nothing. Configure retryability explicitly with
+/// [`RetryPolicy::retry_if`].
 #[derive(Clone)]
 pub struct RetryPolicy {
     max_attempts: u32,
@@ -16,14 +20,29 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Create a policy with at most `max_attempts` total attempts per item.
+    ///
+    /// The default predicate retries nothing until [`RetryPolicy::retry_if`] is
+    /// configured.
     pub fn new(max_attempts: u32) -> Self {
         Self {
             max_attempts: max_attempts.max(1),
             base_delay: Duration::from_millis(25),
             max_delay: Duration::from_secs(5),
             jitter: None,
-            retry_if: Arc::new(|_| true),
+            retry_if: Arc::new(|_| false),
         }
+    }
+
+    /// Convenience helper for a policy with no retries (`max_attempts = 1`).
+    pub fn none() -> Self {
+        Self::new(1)
+    }
+
+    /// Explicitly disable retries for this policy.
+    pub fn retry_none(mut self) -> Self {
+        self.retry_if = Arc::new(|_| false);
+        self
     }
 
     pub fn base_delay(mut self, base_delay: Duration) -> Self {
@@ -99,8 +118,11 @@ pub struct ErrorContext<'a> {
 
 #[derive(Debug)]
 pub enum ErrorAction {
+    /// Retry the current item, bounded by [`RetryPolicy::max_attempts`].
     Retry,
+    /// Drop the current item and continue processing subsequent items.
     Skip,
+    /// Fail the stage immediately with this error.
     Fail(Error),
 }
 

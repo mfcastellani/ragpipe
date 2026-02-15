@@ -84,9 +84,15 @@ where
         })?;
 
         tokio::select! {
-            _ = cancel.cancelled() => Ok(EmitOutcome::Stop),
+            _ = cancel.cancelled() => {
+                #[cfg(feature = "tracing")]
+                tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = "ndjson_decoder", where_ = "send", "ragpipe.cancelled");
+                Ok(EmitOutcome::Stop)
+            },
             sent = output.send(value) => {
                 if sent.is_err() {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = "ndjson_decoder", "ragpipe.downstream.closed");
                     Ok(EmitOutcome::Stop)
                 } else {
                     Ok(EmitOutcome::Continue)
@@ -101,6 +107,10 @@ impl<T> Pipe<Bytes, T> for NdjsonDecoder<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
+    fn stage_name(&self) -> &'static str {
+        "ndjson_decoder"
+    }
+
     async fn process(
         &self,
         mut input: Receiver<Bytes>,
@@ -108,11 +118,18 @@ where
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage_name();
+
         let mut line_buf = Vec::new();
 
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
+                _ = cancel.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                    return Ok(())
+                },
                 msg = input.recv() => {
                     let Some(chunk) = msg else { break; };
 

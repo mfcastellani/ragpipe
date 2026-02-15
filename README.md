@@ -170,7 +170,7 @@ let retry = RetryPolicy::new(4)
     .base_delay(Duration::from_millis(25))
     .max_delay(Duration::from_secs(1))
     .with_jitter(Duration::from_millis(20))
-    // Prefer structured error predicates over string matching:
+    // Retries are opt-in; configure retryability explicitly:
     .retry_if(|err| matches!(err, ragpipe::error::Error::Pipeline { .. }));
 
 let pipeline = source
@@ -186,10 +186,12 @@ let pipeline = source
 });
 ```
 
+`RetryPolicy::new(max_attempts)` retries nothing by default until `.retry_if(...)` is set.
 
 ### try_map_ref + retry (zero-copy)
 
-Use this for large items when retries are enabled, to avoid `Clone` on every retry:
+Use `try_map_ref` for large items when retries are enabled, to avoid `Clone` on every retry.
+`try_map` consumes items and may require `Clone` to retry the same value:
 
 ```rust
 let pipeline = source
@@ -198,6 +200,17 @@ let pipeline = source
 ```
 
 These adapters are cancellable and streaming-safe.
+
+### on_error semantics
+
+`on_error` can decide per-item behavior:
+
+- `ErrorAction::Retry`: retry the same item (still bounded by `max_attempts`)
+- `ErrorAction::Skip`: drop current item and continue stream processing
+- `ErrorAction::Fail(err)`: fail stage immediately with `err`
+
+If an error handler is registered, its action overrides the policy's default retry/fail decision.
+`max_attempts` remains enforced.
 
 ## Cancellation
 
@@ -209,6 +222,43 @@ cancel.cancel(); // stops the entire pipeline
 ```
 
 Stages are expected to exit gracefully when cancellation occurs.
+
+## API Contracts
+
+- Bounded memory and backpressure: stages communicate via bounded Tokio channels.
+- Cancellation semantics: cancellation stops stages promptly and no further retries are attempted.
+- Retry semantics: `RetryPolicy::new(max_attempts)` retries nothing by default unless `.retry_if(...)` is configured.
+- Downstream-closed semantics: output channel close is treated as graceful shutdown (no error).
+
+## Observability
+
+Enable tracing instrumentation:
+
+```toml
+ragpipe = { version = "0.2", features = ["tracing"] }
+```
+
+Minimal setup with `tracing-subscriber`:
+
+```rust
+use tracing_subscriber::fmt;
+
+fn main() {
+    fmt()
+        .with_target(false)
+        .with_env_filter("ragpipe=info")
+        .init();
+}
+```
+
+With this enabled, ragpipe emits structured spans/events like:
+- `ragpipe.stage`
+- `ragpipe.retry.attempt_failed`
+- `ragpipe.retry.sleep`
+- `ragpipe.retry.exhausted`
+- `ragpipe.error_handler.action`
+- `ragpipe.downstream.closed`
+- `ragpipe.cancelled`
 
 ## Roadmap
 

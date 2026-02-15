@@ -33,6 +33,7 @@ impl<A, F, M> Chain<A, TryMapPipe<F>, M> {
         self
     }
 
+    #[deprecated(note = "use with_retry()")]
     pub fn retry(self, policy: RetryPolicy) -> Self {
         self.with_retry(policy)
     }
@@ -52,6 +53,7 @@ impl<A, F, M> Chain<A, TryMapRefPipe<F>, M> {
         self
     }
 
+    #[deprecated(note = "use with_retry()")]
     pub fn retry(self, policy: RetryPolicy) -> Self {
         self.with_retry(policy)
     }
@@ -74,6 +76,10 @@ where
     A: Pipe<I, M> + Send + Sync,
     B: Pipe<M, O> + Send + Sync,
 {
+    fn stage_name(&self) -> &'static str {
+        "chain"
+    }
+
     async fn process(
         &self,
         input: mpsc::Receiver<I>,
@@ -83,7 +89,33 @@ where
     ) -> Result<()> {
         let (tx_mid, rx_mid) = mpsc::channel::<M>(buffer);
 
+        #[cfg(feature = "tracing")]
+        use tracing::Instrument;
+
+        #[cfg(feature = "tracing")]
+        let left = self
+            .a
+            .process(input, tx_mid, buffer, cancel.clone())
+            .instrument(tracing::info_span!(
+                "ragpipe.stage",
+                stage = self.a.stage_name(),
+                buffer = buffer
+            ));
+
+        #[cfg(not(feature = "tracing"))]
         let left = self.a.process(input, tx_mid, buffer, cancel.clone());
+
+        #[cfg(feature = "tracing")]
+        let right = self
+            .b
+            .process(rx_mid, output, buffer, cancel.clone())
+            .instrument(tracing::info_span!(
+                "ragpipe.stage",
+                stage = self.b.stage_name(),
+                buffer = buffer
+            ));
+
+        #[cfg(not(feature = "tracing"))]
         let right = self.b.process(rx_mid, output, buffer, cancel.clone());
 
         tokio::pin!(left);
@@ -99,6 +131,8 @@ where
                 res = &mut left, if !left_done => {
                     left_done = true;
                     if res.is_err() {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = "chain", where_ = "left_error", "ragpipe.cancelled");
                         cancel.cancel();
                     }
                     left_res = Some(res);
@@ -106,6 +140,8 @@ where
                 res = &mut right, if !right_done => {
                     right_done = true;
                     if res.is_err() {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = "chain", where_ = "right_error", "ragpipe.cancelled");
                         cancel.cancel();
                     }
                     right_res = Some(res);
