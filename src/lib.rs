@@ -30,7 +30,7 @@
 //!
 //! ---
 //!
-//! ## Example
+//! ## Getting Started
 //!
 //! A minimal streaming pipeline:
 //!
@@ -61,6 +61,94 @@
 //!
 //!     Ok(())
 //! }
+//! ```
+//!
+//! ---
+//!
+//! ## Common Patterns
+//!
+//! ### Retry Transient Errors
+//!
+//! ```no_run
+//! use ragpipe::pipeline::chain::PipeExt;
+//! use ragpipe::pipeline::retry::RetryPolicy;
+//!
+//! # fn example<S>(source: S)
+//! # where
+//! #   S: ragpipe::pipeline::pipe::Pipe<(), u32> + Send + Sync + 'static,
+//! # {
+//! let retry = RetryPolicy::new(4)
+//!     .base_delay(std::time::Duration::from_millis(25))
+//!     .max_delay(std::time::Duration::from_secs(1))
+//!     .retry_if(|err| matches!(err, ragpipe::error::Error::Pipeline { .. }));
+//!
+//! let pipeline = source
+//!     .try_map("enrich", |x| async move {
+//!         if x % 2 == 0 {
+//!             Err(ragpipe::error::Error::pipeline("transient"))
+//!         } else {
+//!             Ok::<u32, ragpipe::error::Error>(x + 1)
+//!         }
+//!     })
+//!     .with_retry(retry);
+//! # let _ = pipeline;
+//! # }
+//! ```
+//!
+//! ### Skip Bad Items And Continue
+//!
+//! ```no_run
+//! use ragpipe::pipeline::chain::PipeExt;
+//! use ragpipe::pipeline::retry::{ErrorAction, RetryPolicy};
+//!
+//! # fn example<S>(source: S)
+//! # where
+//! #   S: ragpipe::pipeline::pipe::Pipe<(), u32> + Send + Sync + 'static,
+//! # {
+//! let pipeline = source
+//!     .try_map("parse", |x| async move {
+//!         if x == 0 {
+//!             Err(ragpipe::error::Error::pipeline("bad-item"))
+//!         } else {
+//!             Ok::<u32, ragpipe::error::Error>(x)
+//!         }
+//!     })
+//!     .with_retry(RetryPolicy::new(3))
+//!     .on_error(|ctx| {
+//!         if matches!(ctx.error, ragpipe::error::Error::Pipeline { context: "bad-item" }) {
+//!             ErrorAction::Skip
+//!         } else {
+//!             ErrorAction::Fail(ragpipe::error::Error::stage(ctx.stage, "unexpected"))
+//!         }
+//!     });
+//! # let _ = pipeline;
+//! # }
+//! ```
+//!
+//! ### Fail Fast On Specific Errors
+//!
+//! ```no_run
+//! use ragpipe::pipeline::chain::PipeExt;
+//! use ragpipe::pipeline::retry::{ErrorAction, RetryPolicy};
+//!
+//! # fn example<S>(source: S)
+//! # where
+//! #   S: ragpipe::pipeline::pipe::Pipe<(), u32> + Send + Sync + 'static,
+//! # {
+//! let pipeline = source
+//!     .try_map("critical", |x| async move {
+//!         Err::<u32, ragpipe::error::Error>(ragpipe::error::Error::pipeline("fatal"))
+//!     })
+//!     .with_retry(RetryPolicy::new(5).retry_if(|_| true))
+//!     .on_error(|ctx| {
+//!         if matches!(ctx.error, ragpipe::error::Error::Pipeline { context: "fatal" }) {
+//!             ErrorAction::Fail(ragpipe::error::Error::stage(ctx.stage, "fail-fast"))
+//!         } else {
+//!             ErrorAction::Retry
+//!         }
+//!     });
+//! # let _ = pipeline;
+//! # }
 //! ```
 //!
 //! ---
@@ -126,7 +214,18 @@
 //!
 //! ---
 //!
-//! ## Cancellation
+//! ## Backpressure Explained
+//!
+//! `ragpipe` uses bounded Tokio channels between stages.
+//!
+//! - If downstream is slower, upstream `send()` naturally waits.
+//! - This keeps memory bounded to channel capacity plus in-flight work.
+//! - You can tune pressure with [`Runtime::buffer`](pipeline::runtime::Runtime::buffer).
+//! - If downstream is closed, stages exit gracefully instead of failing.
+//!
+//! ---
+//!
+//! ## Cancellation Semantics
 //!
 //! Pipelines support graceful cancellation via [`CancelToken`].
 //!
@@ -149,6 +248,62 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Cancellation rules:
+//!
+//! - Stages should check/await cancellation and exit quickly.
+//! - Retries stop when cancelled, including during backoff sleep.
+//! - Cancellation is cooperative; no task is force-killed.
+//!
+//! ---
+//!
+//! ## Writing Your Own Pipe
+//!
+//! Implement [`Pipe`] when you need a custom stage:
+//!
+//! ```no_run
+//! use async_trait::async_trait;
+//! use ragpipe::error::Result;
+//! use ragpipe::pipeline::cancel::CancelToken;
+//! use ragpipe::pipeline::pipe::Pipe;
+//! use tokio::sync::mpsc::{Receiver, Sender};
+//!
+//! struct Uppercase;
+//!
+//! #[async_trait]
+//! impl Pipe<String, String> for Uppercase {
+//!     fn stage_name(&self) -> &'static str {
+//!         "uppercase"
+//!     }
+//!
+//!     async fn process(
+//!         &self,
+//!         mut input: Receiver<String>,
+//!         output: Sender<String>,
+//!         _buffer: usize,
+//!         cancel: CancelToken,
+//!     ) -> Result<()> {
+//!         loop {
+//!             tokio::select! {
+//!                 _ = cancel.cancelled() => break,
+//!                 msg = input.recv() => {
+//!                     let Some(v) = msg else { break; };
+//!                     if output.send(v.to_uppercase()).await.is_err() {
+//!                         break;
+//!                     }
+//!                 }
+//!             }
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//! ```
+//!
+//! Guidelines:
+//!
+//! - Treat `output.send(...).await.is_err()` as graceful downstream shutdown.
+//! - Respect cancellation in receive loops and long operations.
+//! - Avoid unbounded buffering inside stages.
 //!
 //! ---
 //!
