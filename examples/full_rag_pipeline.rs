@@ -56,9 +56,9 @@ impl MockEmbedder {
 
     fn embed(&self, text: &str) -> Vec<f32> {
         // Simple mock: use hash of text to generate deterministic embedding
-        let hash = text.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
         (0..self.dimension)
             .map(|i| {

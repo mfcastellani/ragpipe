@@ -52,7 +52,8 @@ where
                 break;
             }
             if output.send(item).await.is_err() {
-                if self.strict_downstream {
+                // Downstream closing due to cancellation is expected and graceful.
+                if self.strict_downstream && !cancel.is_cancelled() {
                     return Err(Error::pipeline("downstream receiver closed unexpectedly"));
                 }
                 break;

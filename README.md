@@ -212,6 +212,55 @@ These adapters are cancellable and streaming-safe.
 If an error handler is registered, its action overrides the policy's default retry/fail decision.
 `max_attempts` remains enforced.
 
+## Runtime Ergonomics
+
+### spawn_sink
+
+When the last stage of a pipeline outputs `()`, use `spawn_sink` to avoid
+manually draining a `Receiver<()>`:
+
+```rust
+let (tx, _cancel, handle) = rt.spawn_sink(pipeline);
+
+tx.send(()).await.unwrap();
+drop(tx);
+handle.await??;
+```
+
+### buffer_stage
+
+Override the intermediate channel buffer for a specific named stage:
+
+```rust
+let rt = Runtime::new()
+    .buffer(128)              // global default
+    .buffer_stage("embed", 8); // narrow buffer into a slow stage
+```
+
+### concurrency_stage
+
+Run multiple async workers in parallel for `try_map` or `try_map_ref` stages:
+
+```rust
+let rt = Runtime::new()
+    .concurrency_stage("embed", 4); // 4 parallel embed workers
+```
+
+Output ordering is **not** preserved when `workers > 1`. This setting only
+applies to `try_map` / `try_map_ref` stages — `map`, `filter`, `inspect`,
+and custom `Pipe` implementations are unaffected.
+
+All three options compose:
+
+```rust
+let rt = Runtime::new()
+    .buffer(64)
+    .buffer_stage("embed", 8)
+    .concurrency_stage("embed", 4);
+
+let (tx, _cancel, handle) = rt.spawn_sink(pipeline);
+```
+
 ## Cancellation
 
 Every pipeline receives a CancelToken:
@@ -273,6 +322,9 @@ With this enabled, ragpipe emits structured spans/events like:
 ### v0.2 (current)
 
 - ✅ NDJSON ingestion
+- ✅ `spawn_sink` (no manual drain)
+- ✅ `buffer_stage` (per-stage channel tuning)
+- ✅ `concurrency_stage` (parallel workers for try_map/try_map_ref)
 - embedding providers (OpenAI / local)
 - S3 streaming source
 

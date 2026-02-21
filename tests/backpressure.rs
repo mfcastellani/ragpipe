@@ -257,7 +257,10 @@ async fn downstream_close_stops_upstream() -> Result<()> {
         "source should stop when downstream closes, but sent {}",
         sent_count
     );
-    assert!(sent_count >= 10, "source should send at least what was received");
+    assert!(
+        sent_count >= 10,
+        "source should send at least what was received"
+    );
 
     Ok(())
 }

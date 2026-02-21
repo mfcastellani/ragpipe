@@ -225,6 +225,73 @@
 //!
 //! ---
 //!
+//! ## Sink Pipelines
+//!
+//! When the last stage of a pipeline outputs `()`, use [`Runtime::spawn_sink`]
+//! instead of [`Runtime::spawn`] to avoid manually draining the terminal channel:
+//!
+//! ```no_run
+//! use ragpipe::pipeline::chain::PipeExt;
+//! use ragpipe::pipeline::runtime::Runtime;
+//! use ragpipe::source::fs::FsSource;
+//! use ragpipe::store::debug::DebugSink;
+//!
+//! #[tokio::main]
+//! async fn main() -> ragpipe::error::Result<()> {
+//!     let pipe = FsSource::new("big.txt").pipe(DebugSink);
+//!
+//!     let rt = Runtime::new();
+//!     let (tx, _cancel, handle) = rt.spawn_sink(pipe);
+//!
+//!     tx.send(()).await.unwrap();
+//!     drop(tx);
+//!     handle.await??;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ---
+//!
+//! ## Per-Stage Tuning
+//!
+//! ### Buffer overrides
+//!
+//! Control the intermediate channel buffer for a single named stage without
+//! changing the global default:
+//!
+//! ```no_run
+//! use ragpipe::pipeline::runtime::Runtime;
+//! # fn example<P>(pipe: P)
+//! # where P: ragpipe::pipeline::pipe::Pipe<(), ()> + Send + Sync + 'static
+//! # {
+//! let rt = Runtime::new()
+//!     .buffer(128)              // global default
+//!     .buffer_stage("embed", 8); // narrow buffer into the slow stage
+//! # let _ = rt.spawn_sink(pipe);
+//! # }
+//! ```
+//!
+//! ### Concurrent workers
+//!
+//! Run multiple async workers in parallel for `try_map` or `try_map_ref` stages:
+//!
+//! ```no_run
+//! use ragpipe::pipeline::runtime::Runtime;
+//! # fn example<P>(pipe: P)
+//! # where P: ragpipe::pipeline::pipe::Pipe<(), ()> + Send + Sync + 'static
+//! # {
+//! let rt = Runtime::new()
+//!     .concurrency_stage("embed", 4); // 4 parallel embed workers
+//! # let _ = rt.spawn_sink(pipe);
+//! # }
+//! ```
+//!
+//! **Note**: output ordering is **not** preserved when `workers > 1`.
+//! Concurrency has no effect on `map`, `filter`, `inspect`, or custom
+//! [`Pipe`] implementations.
+//!
+//! ---
+//!
 //! ## Cancellation Semantics
 //!
 //! Pipelines support graceful cancellation via [`CancelToken`].

@@ -14,6 +14,7 @@ mod common;
 use common::VecSource;
 
 /// A stage that tracks if it was cancelled
+#[allow(dead_code)]
 struct TrackingPipe {
     was_cancelled: Arc<AtomicBool>,
 }

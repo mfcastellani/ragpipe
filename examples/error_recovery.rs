@@ -231,12 +231,16 @@ async fn main() -> Result<()> {
         .on_error(move |ctx| {
             // Custom error handler to decide what to do with each error
             match ctx.error {
-                Error::Pipeline { context: "malformed" } => {
+                Error::Pipeline {
+                    context: "malformed",
+                } => {
                     println!("   ⏭  Skipping malformed item (stage: {})", ctx.stage);
                     stats_for_error_handler.record_skip();
                     ErrorAction::Skip
                 }
-                Error::Pipeline { context: "critical" } => {
+                Error::Pipeline {
+                    context: "critical",
+                } => {
                     println!("\n   🛑 Critical error encountered - stopping pipeline");
                     ErrorAction::Fail(Error::stage(ctx.stage, "critical error - aborting"))
                 }

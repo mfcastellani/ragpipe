@@ -34,3 +34,6 @@ required-features = ["ndjson"]
 [[example]]
 name = "ndjson_source"
 required-features = ["ndjson"]
+
+[[example]]
+name = "runtime_config"

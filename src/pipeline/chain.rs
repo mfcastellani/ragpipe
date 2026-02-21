@@ -33,11 +33,6 @@ impl<A, F, M> Chain<A, TryMapPipe<F>, M> {
         self
     }
 
-    #[deprecated(note = "use with_retry()")]
-    pub fn retry(self, policy: RetryPolicy) -> Self {
-        self.with_retry(policy)
-    }
-
     pub fn on_error<H>(mut self, handler: H) -> Self
     where
         H: for<'a> Fn(ErrorContext<'a>) -> ErrorAction + Send + Sync + 'static,
@@ -51,11 +46,6 @@ impl<A, F, M> Chain<A, TryMapRefPipe<F>, M> {
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.b = self.b.with_retry(policy);
         self
-    }
-
-    #[deprecated(note = "use with_retry()")]
-    pub fn retry(self, policy: RetryPolicy) -> Self {
-        self.with_retry(policy)
     }
 
     pub fn on_error<H>(mut self, handler: H) -> Self
@@ -87,7 +77,10 @@ where
         buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
-        let (tx_mid, rx_mid) = mpsc::channel::<M>(buffer);
+        let buf = crate::pipeline::config::STAGE_CONFIG
+            .try_with(|cfg| cfg.buffer_for(self.b.stage_name(), buffer))
+            .unwrap_or(buffer);
+        let (tx_mid, rx_mid) = mpsc::channel::<M>(buf);
 
         #[cfg(feature = "tracing")]
         use tracing::Instrument;

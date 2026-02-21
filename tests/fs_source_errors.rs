@@ -1,6 +1,6 @@
-use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use ragpipe::error::Result;
 use ragpipe::pipeline::chain::PipeExt;
 use ragpipe::pipeline::runtime::Runtime;
@@ -44,7 +44,10 @@ async fn fs_source_directory_instead_of_file() {
     drop(tx);
 
     let result = handle.await.unwrap();
-    assert!(result.is_err(), "should fail when trying to read a directory");
+    assert!(
+        result.is_err(),
+        "should fail when trying to read a directory"
+    );
 
     let err = result.unwrap_err();
     let msg = format!("{err}");

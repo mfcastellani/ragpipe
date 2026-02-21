@@ -1,25 +1,50 @@
 use std::future::Future;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::error::{Error, Result};
 use crate::pipeline::cancel::CancelToken;
+use crate::pipeline::config::STAGE_CONFIG;
 use crate::pipeline::pipe::Pipe;
 use crate::pipeline::retry::{ErrorAction, ErrorContext, ErrorHandler, RetryPolicy};
 
 pub struct TryMapPipe<F> {
     stage: &'static str,
-    f: F,
+    f: Arc<F>,
     retry_policy: RetryPolicy,
     error_handler: Option<ErrorHandler>,
 }
 
 pub struct TryMapRefPipe<F> {
     stage: &'static str,
-    f: F,
+    f: Arc<F>,
     retry_policy: RetryPolicy,
     error_handler: Option<ErrorHandler>,
+}
+
+// Manual Clone impls so we don't require F: Clone (Arc<F> is always Clone).
+impl<F> Clone for TryMapPipe<F> {
+    fn clone(&self) -> Self {
+        Self {
+            stage: self.stage,
+            f: Arc::clone(&self.f),
+            retry_policy: self.retry_policy.clone(),
+            error_handler: self.error_handler.clone(),
+        }
+    }
+}
+
+impl<F> Clone for TryMapRefPipe<F> {
+    fn clone(&self) -> Self {
+        Self {
+            stage: self.stage,
+            f: Arc::clone(&self.f),
+            retry_policy: self.retry_policy.clone(),
+            error_handler: self.error_handler.clone(),
+        }
+    }
 }
 
 enum RunResult<O> {
@@ -32,7 +57,7 @@ impl<F> TryMapPipe<F> {
     pub fn new(stage: &'static str, f: F) -> Self {
         Self {
             stage,
-            f,
+            f: Arc::new(f),
             retry_policy: RetryPolicy::new(1),
             error_handler: None,
         }
@@ -45,12 +70,6 @@ impl<F> TryMapPipe<F> {
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
-    }
-
-    /// Deprecated alias for [`Self::with_retry`].
-    #[deprecated(note = "use with_retry()")]
-    pub fn retry(self, policy: RetryPolicy) -> Self {
-        self.with_retry(policy)
     }
 
     /// Install a per-item error handler.
@@ -70,7 +89,7 @@ impl<F> TryMapRefPipe<F> {
     pub fn new(stage: &'static str, f: F) -> Self {
         Self {
             stage,
-            f,
+            f: Arc::new(f),
             retry_policy: RetryPolicy::new(1),
             error_handler: None,
         }
@@ -83,12 +102,6 @@ impl<F> TryMapRefPipe<F> {
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
-    }
-
-    /// Deprecated alias for [`Self::with_retry`].
-    #[deprecated(note = "use with_retry()")]
-    pub fn retry(self, policy: RetryPolicy) -> Self {
-        self.with_retry(policy)
     }
 
     /// Install a per-item error handler.
@@ -110,7 +123,7 @@ where
     I: Send + Clone + 'static,
     O: Send + 'static,
     F: Fn(I) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<O>> + Send,
+    Fut: Future<Output = Result<O>> + Send + 'static,
 {
     fn stage_name(&self) -> &'static str {
         self.stage
@@ -118,38 +131,20 @@ where
 
     async fn process(
         &self,
-        mut input: Receiver<I>,
+        input: Receiver<I>,
         output: Sender<O>,
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
-        #[cfg(feature = "tracing")]
-        let stage = self.stage_name();
+        let concurrency = STAGE_CONFIG
+            .try_with(|cfg| cfg.concurrency_for(self.stage))
+            .unwrap_or(1);
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    #[cfg(feature = "tracing")]
-                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
-                    break
-                },
-                msg = input.recv() => {
-                    let Some(item) = msg else { break; };
-                    let value = match self.run_with_retry(item, cancel.clone()).await? {
-                        RunResult::Emit(v) => v,
-                        RunResult::Skip => continue,
-                        RunResult::Stop => break,
-                    };
-
-                    if output.send(value).await.is_err() {
-                        #[cfg(feature = "tracing")]
-                        tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = stage, "ragpipe.downstream.closed");
-                        break;
-                    }
-                }
-            }
+        if concurrency <= 1 {
+            return self.process_single(input, output, cancel).await;
         }
-        Ok(())
+        self.process_concurrent(input, output, cancel, concurrency)
+            .await
     }
 }
 
@@ -167,13 +162,39 @@ where
 
     async fn process(
         &self,
-        mut input: Receiver<I>,
+        input: Receiver<I>,
         output: Sender<O>,
         _buffer: usize,
         cancel: CancelToken,
     ) -> Result<()> {
+        let concurrency = STAGE_CONFIG
+            .try_with(|cfg| cfg.concurrency_for(self.stage))
+            .unwrap_or(1);
+
+        if concurrency <= 1 {
+            return self.process_single(input, output, cancel).await;
+        }
+        self.process_concurrent(input, output, cancel, concurrency)
+            .await
+    }
+}
+
+// ── TryMapPipe helpers ──────────────────────────────────────────────────────
+
+impl<F> TryMapPipe<F> {
+    async fn process_single<I, O, Fut>(
+        &self,
+        mut input: Receiver<I>,
+        output: Sender<O>,
+        cancel: CancelToken,
+    ) -> Result<()>
+    where
+        I: Clone,
+        F: Fn(I) -> Fut,
+        Fut: Future<Output = Result<O>>,
+    {
         #[cfg(feature = "tracing")]
-        let stage = self.stage_name();
+        let stage = self.stage;
 
         loop {
             tokio::select! {
@@ -200,9 +221,63 @@ where
         }
         Ok(())
     }
-}
 
-impl<F> TryMapPipe<F> {
+    async fn process_concurrent<I, O, Fut>(
+        &self,
+        input: Receiver<I>,
+        output: Sender<O>,
+        cancel: CancelToken,
+        workers: usize,
+    ) -> Result<()>
+    where
+        I: Clone + Send + 'static,
+        O: Send + 'static,
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+    {
+        let input = Arc::new(tokio::sync::Mutex::new(input));
+        let mut set = tokio::task::JoinSet::new();
+
+        for _ in 0..workers {
+            let input = input.clone();
+            let output = output.clone();
+            let cancel = cancel.clone();
+            let pipe = self.clone();
+
+            set.spawn(async move {
+                loop {
+                    let item = {
+                        let mut rx = tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            g = input.lock() => g,
+                        };
+                        tokio::select! {
+                            _ = cancel.cancelled() => None,
+                            msg = rx.recv() => msg,
+                        }
+                        // MutexGuard dropped here
+                    };
+
+                    match item {
+                        None => break,
+                        Some(v) => match pipe.run_with_retry(v, cancel.clone()).await? {
+                            RunResult::Emit(out) => {
+                                if output.send(out).await.is_err() {
+                                    break;
+                                }
+                            }
+                            RunResult::Skip => continue,
+                            RunResult::Stop => break,
+                        },
+                    }
+                }
+                Ok::<(), Error>(())
+            });
+        }
+
+        collect_workers(set, &cancel).await
+    }
+
     async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<RunResult<O>>
     where
         I: Clone,
@@ -344,7 +419,104 @@ impl<F> TryMapPipe<F> {
     }
 }
 
+// ── TryMapRefPipe helpers ───────────────────────────────────────────────────
+
 impl<F> TryMapRefPipe<F> {
+    async fn process_single<I, O, Fut>(
+        &self,
+        mut input: Receiver<I>,
+        output: Sender<O>,
+        cancel: CancelToken,
+    ) -> Result<()>
+    where
+        F: Fn(&I) -> Fut,
+        Fut: Future<Output = Result<O>>,
+    {
+        #[cfg(feature = "tracing")]
+        let stage = self.stage;
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::event!(tracing::Level::DEBUG, event = "ragpipe.cancelled", stage = stage, where_ = "recv", "ragpipe.cancelled");
+                    break
+                },
+                msg = input.recv() => {
+                    let Some(item) = msg else { break; };
+                    let value = match self.run_with_retry(item, cancel.clone()).await? {
+                        RunResult::Emit(v) => v,
+                        RunResult::Skip => continue,
+                        RunResult::Stop => break,
+                    };
+
+                    if output.send(value).await.is_err() {
+                        #[cfg(feature = "tracing")]
+                        tracing::event!(tracing::Level::INFO, event = "ragpipe.downstream.closed", stage = stage, "ragpipe.downstream.closed");
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_concurrent<I, O, Fut>(
+        &self,
+        input: Receiver<I>,
+        output: Sender<O>,
+        cancel: CancelToken,
+        workers: usize,
+    ) -> Result<()>
+    where
+        I: Send + 'static,
+        O: Send + 'static,
+        F: Fn(&I) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+    {
+        let input = Arc::new(tokio::sync::Mutex::new(input));
+        let mut set = tokio::task::JoinSet::new();
+
+        for _ in 0..workers {
+            let input = input.clone();
+            let output = output.clone();
+            let cancel = cancel.clone();
+            let pipe = self.clone();
+
+            set.spawn(async move {
+                loop {
+                    let item = {
+                        let mut rx = tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            g = input.lock() => g,
+                        };
+                        tokio::select! {
+                            _ = cancel.cancelled() => None,
+                            msg = rx.recv() => msg,
+                        }
+                        // MutexGuard dropped here
+                    };
+
+                    match item {
+                        None => break,
+                        Some(v) => match pipe.run_with_retry(v, cancel.clone()).await? {
+                            RunResult::Emit(out) => {
+                                if output.send(out).await.is_err() {
+                                    break;
+                                }
+                            }
+                            RunResult::Skip => continue,
+                            RunResult::Stop => break,
+                        },
+                    }
+                }
+                Ok::<(), Error>(())
+            });
+        }
+
+        collect_workers(set, &cancel).await
+    }
+
     async fn run_with_retry<I, O, Fut>(&self, item: I, cancel: CancelToken) -> Result<RunResult<O>>
     where
         F: Fn(&I) -> Fut,
@@ -479,4 +651,32 @@ impl<F> TryMapRefPipe<F> {
             }
         }
     }
+}
+
+// ── Shared worker-pool result collector ────────────────────────────────────
+
+async fn collect_workers(
+    mut set: tokio::task::JoinSet<Result<()>>,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let mut result: Result<()> = Ok(());
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if result.is_ok() {
+                    result = Err(e);
+                }
+                cancel.cancel();
+                set.abort_all();
+            }
+            Err(e) if e.is_cancelled() => {} // aborted by us
+            Err(e) => {
+                if result.is_ok() {
+                    result = Err(Error::Join(e));
+                }
+            }
+        }
+    }
+    result
 }
